@@ -34,9 +34,15 @@ logger = init_logger(__name__)
 def _request_float_consumers(
     sampling_params: OmniDiffusionSamplingParams | None,
 ) -> frozenset[FloatVideoConsumer]:
-    if sampling_params is not None and sampling_params.enable_frame_interpolation:
-        return frozenset({FloatVideoConsumer.FRAME_INTERPOLATION})
-    return frozenset()
+    # UPSCALE_PATCH_CONSUMERS: upscale needs NORMALIZED_FLOAT frames
+    consumers: set[FloatVideoConsumer] = set()
+    if sampling_params is None:
+        return frozenset()
+    if sampling_params.enable_frame_interpolation:
+        consumers.add(FloatVideoConsumer.FRAME_INTERPOLATION)
+    if getattr(sampling_params, "enable_upscale", False):
+        consumers.add(FloatVideoConsumer.UPSCALE)
+    return frozenset(consumers)
 
 
 def _request_supports_uint8_frames(sampling_params: OmniDiffusionSamplingParams | None) -> bool:

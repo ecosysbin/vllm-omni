@@ -515,6 +515,19 @@ class OmniOpenAIServingVideo:
             gen_params.frame_interpolation_scale = request.frame_interpolation_scale
         if "frame_interpolation_model_path" in provided_fields:
             gen_params.frame_interpolation_model_path = request.frame_interpolation_model_path
+        # UPSCALE_PATCH_SERVING: map request fields into sampling params
+        if "enable_upscale" in provided_fields:
+            gen_params.enable_upscale = request.enable_upscale
+        if "upscale_scale" in provided_fields:
+            gen_params.upscale_scale = request.upscale_scale
+        if "upscale_model_path" in provided_fields:
+            gen_params.upscale_model_path = request.upscale_model_path
+        if "upscale_native_scale" in provided_fields:
+            gen_params.upscale_native_scale = request.upscale_native_scale
+        if "upscale_tile" in provided_fields:
+            gen_params.upscale_tile = request.upscale_tile
+        if "upscale_max_frames" in provided_fields:
+            gen_params.upscale_max_frames = request.upscale_max_frames
 
         if "num_inference_steps" in provided_fields and request.num_inference_steps is not None:
             gen_params.num_inference_steps = request.num_inference_steps
@@ -618,6 +631,28 @@ class OmniOpenAIServingVideo:
         frame_counts = video_metadata.get("frame_counts") if isinstance(video_metadata, Mapping) else None
         if not valid_frame_counts(frame_counts, len(cast(list[DiffusionPayloadValue], videos))):
             frame_counts = None
+        # UPSCALE_PATCH_SERVING_POST: H3 frames skip engine finalize; upscale before encode
+        # run in a worker thread so the event loop (and /health probe) stays responsive
+        if getattr(gen_params, "enable_upscale", False) and videos:
+            try:
+                import asyncio as _asyncio
+                from vllm_omni.diffusion.postprocess.upscaler import upscale_numpy_videos as _upnp
+
+                videos = await _asyncio.to_thread(
+                    _upnp,
+                    videos,
+                    scale=float(getattr(gen_params, "upscale_scale", 2.0)),
+                    model_path=getattr(gen_params, "upscale_model_path", None),
+                    native_scale=int(getattr(gen_params, "upscale_native_scale", 4)),
+                    tile=int(getattr(gen_params, "upscale_tile", 256)),
+                    max_frames=int(getattr(gen_params, "upscale_max_frames", 8)),
+                    half=bool(getattr(gen_params, "upscale_half", True)),
+                    logger=logger,
+                )
+                logger.info("video upscale done (serving layer): %s", [getattr(v, "shape", None) for v in videos])
+            except Exception as exc:  # degrade to base frames
+                logger.warning("video upscale failed at serving layer, returning base frames: %s", exc)
+
         return VideoGenerationArtifacts(
             videos=videos,
             audios=audios,

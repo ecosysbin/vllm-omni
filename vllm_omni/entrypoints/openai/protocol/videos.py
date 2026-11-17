@@ -357,6 +357,41 @@ class VideoGenerationRequest(BaseModel):
         ),
     )
 
+    # UPSCALE_PATCH_PROTOCOL: post-generation super resolution
+    enable_upscale: bool = Field(
+        default=False,
+        description="Enable post-generation super resolution (RealESRGAN RRDBNet) before MP4 encoding.",
+    )
+    upscale_scale: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=4.0,
+        description="Output pixel multiplier relative to the decoded frames (2.0 => 1344x768 becomes 2688x1536).",
+    )
+    upscale_model_path: str | None = Field(
+        default=None,
+        description="Path to RealESRGAN RRDBNet weights (.pth) inside the container, "
+        "e.g. /models/Upscaler/realesrgan-x4plus/RealESRGAN_x4plus.pth",
+    )
+    upscale_native_scale: int = Field(
+        default=4,
+        ge=2,
+        le=4,
+        description="Native upsample factor baked into the weights (4 for RealESRGAN_x4plus, 2 for the x2 variant).",
+    )
+    upscale_tile: int = Field(
+        default=256,
+        ge=64,
+        le=1024,
+        description="Tile size for tiled inference; smaller tiles use less VRAM.",
+    )
+    upscale_max_frames: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="Frames processed per chunk while upscaling.",
+    )
+
     # vllm-omni extension for per-request LoRA.
     lora: dict[str, Any] | None = Field(
         default=None,
