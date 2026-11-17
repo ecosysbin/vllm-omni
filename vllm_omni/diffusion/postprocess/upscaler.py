@@ -97,7 +97,12 @@ def _load_net(model_path: str, device: torch.device, native_scale: int, num_bloc
     if not isinstance(state, dict):
         raise ValueError(f"Upscaler weights must be a state dict mapping: {model_path}")
     sd = state.get("params_ema") or state.get("params") or state
-    net = RRDBNet(scale=native_scale, num_block=num_block)
+    # Real-ESRGAN x2 weights (RealESRGAN_x2plus) take a pixel-unshuffled 12-channel input
+    # (3 x 2x2) and still run two 2x stages internally: the heavy RRDB body therefore works
+    # on a quarter of the pixels and the output lands at 2x of the original frame. See
+    # "Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data".
+    num_in_ch = 12 if native_scale == 2 else 3
+    net = RRDBNet(num_in_ch=num_in_ch, scale=4, num_block=num_block)
     net.load_state_dict(sd, strict=True)
     net.eval().to(device)
     if half:
@@ -135,7 +140,14 @@ def _upscale_one(net: RRDBNet, frame: torch.Tensor, native_scale: int, tile: int
         for x0 in range(0, width, step):
             x1 = min(x0 + tile, width)
             patch = frame[..., y0:y1, x0:x1]
+            ph, pw = y1 - y0, x1 - x0
+            if ph % 2 or pw % 2:
+                # pixel_unshuffle needs even spatial dims; replicate-pad then crop the result.
+                patch = F.pad(patch, (0, pw % 2, 0, ph % 2), mode="replicate")
+            if native_scale == 2:
+                patch = F.pixel_unshuffle(patch, 2)
             out = net(patch)
+            out = out[..., : ph * native_scale, : pw * native_scale]
             oy0, ox0 = y0 * native_scale, x0 * native_scale
             oy1, ox1 = oy0 + out.shape[-2], ox0 + out.shape[-1]
             wy = _axis_weights(out.shape[-2], overlap * native_scale, (y0 > 0, y1 < height)).to(dtype)
