@@ -70,7 +70,9 @@ class RRDBNet(nn.Module):
         self.body = nn.Sequential(*[RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
         self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        # The official x2 weights (RealESRGAN_x2plus) only carry one upsample stage,
+        # so scale=2 must not register conv_up2 or strict loading fails on missing keys.
+        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1) if scale != 2 else None
         self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
         self.lrelu = nn.LeakyReLU(0.2, inplace=True)
@@ -79,12 +81,15 @@ class RRDBNet(nn.Module):
         feat = self.conv_first(x)
         feat = feat + self.conv_body(self.body(feat))
         feat = self.lrelu(self.conv_up1(F.interpolate(feat, scale_factor=2, mode="nearest")))
-        feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode="nearest")))
+        if self.conv_up2 is not None:
+            feat = self.lrelu(self.conv_up2(F.interpolate(feat, scale_factor=2, mode="nearest")))
         return self.conv_last(self.lrelu(self.conv_hr(feat)))
 
 
 def _load_net(model_path: str, device: torch.device, native_scale: int, num_block: int, half: bool = False) -> RRDBNet:
-    key = (model_path, str(device), str(half))
+    # native_scale/num_block change the module structure, so they belong in the cache key;
+    # otherwise a scale=4 net could be reused for a scale=2 request on the same path.
+    key = (model_path, str(device), str(half), int(native_scale), int(num_block))
     cached = _CACHE.get(key)
     if cached is not None:
         return cached
