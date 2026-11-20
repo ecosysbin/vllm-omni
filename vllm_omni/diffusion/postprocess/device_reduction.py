@@ -34,7 +34,8 @@ logger = init_logger(__name__)
 def _request_float_consumers(
     sampling_params: OmniDiffusionSamplingParams | None,
 ) -> frozenset[FloatVideoConsumer]:
-    # UPSCALE_PATCH_CONSUMERS: upscale needs NORMALIZED_FLOAT frames
+    # 超分需要 NORMALIZED_FLOAT 帧：把它也登记成浮点消费者，
+    # 免得设备归约提前把帧压成 uint8。
     consumers: set[FloatVideoConsumer] = set()
     if sampling_params is None:
         return frozenset()

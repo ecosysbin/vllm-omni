@@ -357,7 +357,8 @@ class VideoGenerationRequest(BaseModel):
         ),
     )
 
-    # UPSCALE_PATCH_PROTOCOL: post-generation super resolution
+    # 生成后超分（POST 请求字段）：在编码 MP4 之前用 RealESRGAN RRDBNet 放大画面。
+    # enable_upscale 关闭时不改变任何原有行为；scale 是相对解码帧的交付倍数。
     enable_upscale: bool = Field(
         default=False,
         description="Enable post-generation super resolution (RealESRGAN RRDBNet) before MP4 encoding.",

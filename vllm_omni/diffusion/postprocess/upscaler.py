@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-# Post-processing video upscaler (Real-ESRGAN RRDBNet) for vLLM-Omni.
+# vLLM-Omni 的视频后处理超分器（Real-ESRGAN RRDBNet）。
 #
-# Design constraints:
-#   * no dependency on basicsr / realesrgan (absent in the image, and we should not add it)
-#   * input/output stay BCTHW + NORMALIZED_FLOAT, so it can be plugged into the
-#     float-consumer pipeline of finalize_diffusion_media()
-#   * tiling + feathered overlap keeps RRDB feature maps from blowing up VRAM at 768p -> 4x
-#   * output follows `scale`; when native scale != target scale, fall back with area interpolation
+# 设计约束：
+#   * 不依赖 basicsr / realesrgan（镜像里没有，也不应该为此新增依赖）
+#   * 输入输出保持 BCTHW + NORMALIZED_FLOAT，以便接入 finalize_diffusion_media()
+#     的浮点消费者管线
+#   * 分块推理 + 羽化重叠，避免 RRDB 特征图在 768p 放大时把显存打爆
+#   * 输出倍数由 `scale` 决定；当权重原生倍数与目标倍数不一致时，用 area 插值回落到目标尺寸
 
 from __future__ import annotations
 
@@ -14,8 +14,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# 已加载的网络按（权重路径、设备、精度、原生倍数、block 数）缓存，避免每帧重复加载。
 _CACHE: dict[tuple[str, str], "RRDBNet"] = {}
 
+# 相邻分块之间保留的重叠像素，用于羽化拼接、消除接缝。
 _OVERLAP = 16
 
 
@@ -39,7 +41,7 @@ class ResidualDenseBlock(nn.Module):
 
 
 class RRDB(nn.Module):
-    """Matches basicsr/RealESRGAN RRDB exactly: only rdb1..rdb3, no conv_body."""
+    """与 basicsr/RealESRGAN 的 RRDB 结构完全一致：只有 rdb1..rdb3，没有 conv_body。"""
 
     def __init__(self, num_feat: int, num_grow_ch: int = 32) -> None:
         super().__init__()
@@ -53,7 +55,7 @@ class RRDB(nn.Module):
 
 
 class RRDBNet(nn.Module):
-    """Real-ESRGAN backbone, key names aligned with the official RealESRGAN_x4plus / x2 weights."""
+    """Real-ESRGAN 主干网络，参数命名与官方 RealESRGAN_x4plus / x2 权重对齐。"""
 
     def __init__(
         self,
@@ -70,8 +72,8 @@ class RRDBNet(nn.Module):
         self.body = nn.Sequential(*[RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
         self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        # The official x2 weights (RealESRGAN_x2plus) only carry one upsample stage,
-        # so scale=2 must not register conv_up2 or strict loading fails on missing keys.
+        # 官方 x2 权重（RealESRGAN_x2plus）只有一级上采样，
+        # 因此 scale=2 时不能注册 conv_up2，否则严格加载会因缺 key 失败。
         self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1) if scale != 2 else None
         self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
@@ -87,8 +89,8 @@ class RRDBNet(nn.Module):
 
 
 def _load_net(model_path: str, device: torch.device, native_scale: int, num_block: int, half: bool = False) -> RRDBNet:
-    # native_scale/num_block change the module structure, so they belong in the cache key;
-    # otherwise a scale=4 net could be reused for a scale=2 request on the same path.
+    # native_scale / num_block 会改变模块结构，所以必须进缓存 key；
+    # 否则同一路径下 scale=4 的网络会被 scale=2 的请求复用，权重根本对不上。
     key = (model_path, str(device), str(half), int(native_scale), int(num_block))
     cached = _CACHE.get(key)
     if cached is not None:
@@ -97,10 +99,10 @@ def _load_net(model_path: str, device: torch.device, native_scale: int, num_bloc
     if not isinstance(state, dict):
         raise ValueError(f"Upscaler weights must be a state dict mapping: {model_path}")
     sd = state.get("params_ema") or state.get("params") or state
-    # Real-ESRGAN x2 weights (RealESRGAN_x2plus) take a pixel-unshuffled 12-channel input
-    # (3 x 2x2) and still run two 2x stages internally: the heavy RRDB body therefore works
-    # on a quarter of the pixels and the output lands at 2x of the original frame. See
-    # "Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data".
+    # 官方 x2 权重（RealESRGAN_x2plus）接收像素解混后的 12 通道输入（3 x 2x2），
+    # 内部仍然跑两级 2x 上采样：繁重的 RRDB 主体因此在四分之一的像素上计算，
+    # 输出正好是原帧的 2 倍。参见论文《Real-ESRGAN: Training Real-World Blind
+    # Super-Resolution with Pure Synthetic Data》。
     num_in_ch = 12 if native_scale == 2 else 3
     net = RRDBNet(num_in_ch=num_in_ch, scale=4, num_block=num_block)
     net.load_state_dict(sd, strict=True)
@@ -114,7 +116,7 @@ def _load_net(model_path: str, device: torch.device, native_scale: int, num_bloc
 
 
 def _axis_weights(length: int, overlap: int, edges: tuple[bool, bool]) -> torch.Tensor:
-    """1-D feather weights: linear ramp on edges that have a neighbouring tile."""
+    """一维羽化权重：只在有相邻分块的那条边上做线性斜坡，避免拼接缝。"""
     w = torch.ones(length)
     overlap = min(overlap, max(1, length // 2))
     if edges[0]:
@@ -125,7 +127,10 @@ def _axis_weights(length: int, overlap: int, edges: tuple[bool, bool]) -> torch.
 
 
 def _upscale_one(net: RRDBNet, frame: torch.Tensor, native_scale: int, tile: int, overlap: int) -> torch.Tensor:
-    """frame: 1,3,H,W in [0,1]; returns 1,3,H*s,W*s with the network weight dtype."""
+    """输入 1,3,H,W、取值 [0,1] 的单帧；返回 1,3,H*s,W*s，dtype 与网络权重一致。
+
+    按 tile 切块推理，每块乘羽化掩码后累加，最后除以权重和，得到无缝的整帧。
+    """
     dtype = next(net.parameters()).dtype
     frame = frame.to(dtype)
     _, _, height, width = frame.shape
@@ -142,7 +147,7 @@ def _upscale_one(net: RRDBNet, frame: torch.Tensor, native_scale: int, tile: int
             patch = frame[..., y0:y1, x0:x1]
             ph, pw = y1 - y0, x1 - x0
             if ph % 2 or pw % 2:
-                # pixel_unshuffle needs even spatial dims; replicate-pad then crop the result.
+                # pixel_unshuffle 要求空间尺寸为偶数；先复制填充，输出时再裁回原尺寸。
                 patch = F.pad(patch, (0, pw % 2, 0, ph % 2), mode="replicate")
             if native_scale == 2:
                 patch = F.pixel_unshuffle(patch, 2)
@@ -169,11 +174,11 @@ def upscale_video_tensor(
     num_block: int = 23,
     half: bool = False,
 ) -> torch.Tensor:
-    """Upscale a BCTHW normalized-float video tensor.
+    """把 BCTHW 归一化浮点视频张量整体超分。
 
-    scale: target factor (default 2 turns 1344x768 into 2688x1536)
-    native_scale: native factor of the weights (RealESRGAN_x4plus=4, x2 variant=2)
-    half: run inference in fp16 (roughly 1.5-2x faster and lower VRAM)
+    scale: 目标倍数（默认 2，即 1344x768 变成 2688x1536）
+    native_scale: 权重原生倍数（RealESRGAN_x4plus=4，x2 变体=2）
+    half: 用 fp16 推理（约快 1.5-2 倍，显存也更省）
     """
     if not model_path:
         raise ValueError("upscale_model_path is required when upscale is enabled")
@@ -184,6 +189,7 @@ def upscale_video_tensor(
     dtype = tensor.dtype
     net = _load_net(model_path, device, native_scale, num_block, half)
 
+    # 自动识别值域：出现负值就按 [-1,1] 处理，先映射到 [0,1] 推理，最后再映射回去。
     negative_one = float(tensor.min()) < -0.05
 
     batch, channels, frames, height, width = tensor.shape
@@ -191,6 +197,7 @@ def upscale_video_tensor(
     out = torch.empty((batch, channels, frames, out_h, out_w), device=device, dtype=dtype)
 
     with torch.no_grad():
+        # 按 max_frames 分段逐帧推理，控制同一时刻的显存峰值。
         chunk = max(1, int(max_frames))
         for start in range(0, frames, chunk):
             end = min(start + chunk, frames)
@@ -201,6 +208,8 @@ def upscale_video_tensor(
                         frame = frame.mul(0.5).add(0.5)
                     frame = frame.clamp_(0.0, 1.0)
                     up = _upscale_one(net, frame, native_scale, tile, _OVERLAP)
+                    # 权重原生倍数与目标倍数不一致时，用 area 插值缩到目标尺寸
+                    # （比双线性更不容易在降采样时产生振铃）。
                     if native_scale != scale:
                         up = F.interpolate(up, size=(out_h, out_w), mode="area")
                     if negative_one:
@@ -222,12 +231,12 @@ def upscale_numpy_videos(
     device: str | None = None,
     logger: object | None = None,
 ):
-    """Serving-layer entry point: upscale a list of numpy frame arrays (THWC/TCHW uint8).
+    """服务层入口：对一组 numpy 帧数组（THWC 或 TCHW、uint8）做超分。
 
-    Streaming per frame: only one frame lives on the device at a time, because a whole-clip
-    4x/2x buffer would OOM (H3 keeps the card nearly full after sampling).
+    逐帧流水处理：同一时刻只有一帧在设备上，因为整段 4x/2x 的缓冲会 OOM
+    （H3 采样结束后显存本来就已经接近打满）。
 
-    Non-4D inputs pass through untouched; exceptions are handled (degraded) by the caller.
+    非 4 维输入原样返回；异常由调用方兜底（降级为基础帧）。
     """
     import numpy as np
 

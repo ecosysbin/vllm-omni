@@ -33,7 +33,7 @@ class VideoColorModel(str, Enum):
 class FloatVideoConsumer(str, Enum):
     FRAME_INTERPOLATION = "frame_interpolation"
     VIDEO_GUARDRAILS = "video_guardrails"
-    UPSCALE = "upscale"  # UPSCALE_PATCH_ENUM
+    UPSCALE = "upscale"  # 后处理超分；需要归一化浮点帧
 
 
 @dataclass(frozen=True, slots=True)
