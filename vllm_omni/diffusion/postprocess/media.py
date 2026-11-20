@@ -65,6 +65,8 @@ def finalize_diffusion_media(
         )
         metadata["video"] = {"video_fps_multiplier": multiplier}
 
+    # UPSCALE_PATCH_FINALIZE_V2: register consumer from sampling_params
+    # (constraints may be dropped before this stage; uint8 frames supported)
     # 超分消费者在这里按采样参数登记（约束有可能在这一步之前已被丢弃；
     # 同时兼容 uint8 帧输入）。失败时降级为原始帧，并记录原因。
     if getattr(sampling_params, "enable_upscale", False):

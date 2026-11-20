@@ -283,6 +283,8 @@ class OmniDiffusionSamplingParams:
     frame_interpolation_exp: int = 1
     frame_interpolation_scale: float = 1.0
     frame_interpolation_model_path: str | None = None
+    # UPSCALE_PATCH_PARAMS post-generation super resolution
+
     # 生成后的超分参数：样本采样完成、编码成 MP4 之前施加。
     enable_upscale: bool = False
     upscale_scale: float = 2.0

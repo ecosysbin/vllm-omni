@@ -515,6 +515,7 @@ class OmniOpenAIServingVideo:
             gen_params.frame_interpolation_scale = request.frame_interpolation_scale
         if "frame_interpolation_model_path" in provided_fields:
             gen_params.frame_interpolation_model_path = request.frame_interpolation_model_path
+        # UPSCALE_PATCH_SERVING: map request fields into sampling params
         # 把请求里的超分字段映射进采样参数（只在表单显式提供时才覆盖默认值）。
         if "enable_upscale" in provided_fields:
             gen_params.enable_upscale = request.enable_upscale
@@ -631,6 +632,8 @@ class OmniOpenAIServingVideo:
         frame_counts = video_metadata.get("frame_counts") if isinstance(video_metadata, Mapping) else None
         if not valid_frame_counts(frame_counts, len(cast(list[DiffusionPayloadValue], videos))):
             frame_counts = None
+        # UPSCALE_PATCH_SERVING_POST: H3 frames skip engine finalize; upscale before encode
+        # run in a worker thread so the event loop (and /health probe) stays responsive
         # H3 的帧不走引擎侧的 finalize，因此超分要在编码之前、在服务层补做。
         # 推理放到工作线程，避免阻塞事件循环（否则 /health 探针会超时）。
         if getattr(gen_params, "enable_upscale", False) and videos:
@@ -684,6 +687,8 @@ class OmniOpenAIServingVideo:
             latent_edit_input=latent_edit_input,
         )
 
+                # CRF 18 with ultrafast put a 2688x1536 delivery near 42 Mbps; a mid
+        # preset at CRF 20 lands near 15 Mbps with no visible loss.
         # ultrafast + CRF 18 会把 2688x1536 的交付推到约 42 Mbps；
         # 换成 medium + CRF 20 后约 15 Mbps，肉眼无可见损失。
         video_codec_options = {"preset": "medium", "crf": "20", "threads": "0"}
@@ -752,6 +757,8 @@ class OmniOpenAIServingVideo:
             )
         audio = artifacts.audios[0]
 
+                # CRF 18 with ultrafast put a 2688x1536 delivery near 42 Mbps; a mid
+        # preset at CRF 20 lands near 15 Mbps with no visible loss.
         # 同一处理：ultrafast + CRF 18 约 42 Mbps，medium + CRF 20 约 15 Mbps 且无可见损失。
         video_codec_options = {"preset": "medium", "crf": "20", "threads": "0"}
         if request.extra_params is not None and isinstance(request.extra_params, dict):
