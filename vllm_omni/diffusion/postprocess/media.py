@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from vllm.logger import init_logger
+
 from vllm_omni.diffusion.media import (
     DiffusionMediaOutput,
     FloatVideoConsumer,
@@ -15,6 +17,9 @@ from vllm_omni.diffusion.media import (
 )
 from vllm_omni.diffusion.postprocess.rife_interpolator import interpolate_video_tensor
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
+
+
+logger = init_logger(__name__)
 
 
 def finalize_diffusion_media(
@@ -59,6 +64,67 @@ def finalize_diffusion_media(
             constraints=VideoTransportConstraints(pending_float_consumers=frozenset(consumers)),
         )
         metadata["video"] = {"video_fps_multiplier": multiplier}
+
+    # UPSCALE_PATCH_FINALIZE_V2: register consumer from sampling_params
+    # (constraints may be dropped before this stage; uint8 frames supported)
+    # 超分消费者在这里按采样参数登记（约束有可能在这一步之前已被丢弃；
+    # 同时兼容 uint8 帧输入）。失败时降级为原始帧，并记录原因。
+    if getattr(sampling_params, "enable_upscale", False):
+        consumers = consumers | {FloatVideoConsumer.UPSCALE}
+    if FloatVideoConsumer.UPSCALE in consumers:
+        try:
+            from vllm_omni.diffusion.media import VideoTensorSpec
+            from vllm_omni.diffusion.postprocess.upscaler import upscale_video_tensor
+
+            logger.info(
+                "video upscale start: encoding=%s shape=%s scale=%s path=%s",
+                video.spec.encoding,
+                tuple(video.tensor.shape),
+                float(getattr(sampling_params, "upscale_scale", 2.0)),
+                getattr(sampling_params, "upscale_model_path", None),
+            )
+            if video.spec.encoding is VideoTensorEncoding.UINT8_FRAMES:
+                if video.spec.layout is not VideoTensorLayout.BTHWC:
+                    raise ValueError("UINT8_FRAMES video must use BTHWC layout for upscale")
+                tensor = video.tensor.float().div_(255.0).permute(0, 4, 1, 2, 3).contiguous()
+                video = replace(
+                    video,
+                    tensor=tensor,
+                    spec=VideoTensorSpec(
+                        layout=VideoTensorLayout.BCTHW,
+                        encoding=VideoTensorEncoding.NORMALIZED_FLOAT,
+                        value_range=VideoValueRange.ZERO_TO_ONE,
+                    ),
+                )
+            # 其余编码（例如已压成 uint8 且不是 BTHWC）无法直接交给 RRDB，直接报错交给兜底。
+            elif video.spec.encoding is not VideoTensorEncoding.NORMALIZED_FLOAT:
+                raise ValueError(f"Upscale does not support encoding={video.spec.encoding}")
+            upscaled = upscale_video_tensor(
+                video.tensor,
+                scale=float(getattr(sampling_params, "upscale_scale", 2.0)),
+                model_path=getattr(sampling_params, "upscale_model_path", None),
+                native_scale=int(getattr(sampling_params, "upscale_native_scale", 4)),
+                tile=int(getattr(sampling_params, "upscale_tile", 256)),
+                max_frames=int(getattr(sampling_params, "upscale_max_frames", 8)),
+            )
+            consumers = consumers - {FloatVideoConsumer.UPSCALE}
+            video = replace(
+                video,
+                tensor=upscaled,
+                constraints=VideoTransportConstraints(pending_float_consumers=frozenset(consumers)),
+            )
+            metadata.setdefault("video", {})["upscale"] = float(
+                getattr(sampling_params, "upscale_scale", 2.0)
+            )
+            logger.info("video upscale done: shape=%s", tuple(upscaled.shape))
+        except Exception as exc:  # fallback to base frames
+            logger.warning("video upscale failed, falling back to base frames: %s", exc)
+            consumers = consumers - {FloatVideoConsumer.UPSCALE}
+            video = replace(
+                video,
+                constraints=VideoTransportConstraints(pending_float_consumers=frozenset(consumers)),
+            )
+            metadata.setdefault("video", {})["upscale_fallback"] = str(exc)[:200]
 
     if consumers:
         names = sorted(consumer.value for consumer in consumers)

@@ -1132,6 +1132,16 @@ async def _parse_video_form(
     frame_interpolation_exp: int | None = Form(default=None, ge=1),
     frame_interpolation_scale: float | None = Form(default=None, gt=0.0),
     frame_interpolation_model_path: str | None = Form(default=None),
+    # UPSCALE_PATCH_FORM: post-generation super resolution
+
+    # 生成后超分（multipart 表单字段）：为 None 表示该请求没有提供，
+    # 由采样参数沿用默认值。
+    enable_upscale: bool | None = Form(default=None),
+    upscale_scale: float | None = Form(default=None),
+    upscale_model_path: str | None = Form(default=None),
+    upscale_native_scale: int | None = Form(default=None),
+    upscale_tile: int | None = Form(default=None),
+    upscale_max_frames: int | None = Form(default=None),
     lora: str | None = Form(default=None),
     extra_params: str | None = Form(default=None),
     return_stage_metrics: bool | None = Form(default=None),
@@ -1219,6 +1229,15 @@ async def _parse_video_form(
         "frame_interpolation_exp": frame_interpolation_exp,
         "frame_interpolation_scale": frame_interpolation_scale,
         "frame_interpolation_model_path": frame_interpolation_model_path,
+        # UPSCALE_PATCH_FORM: post-generation super resolution
+
+        # 超分相关字段原样透传；值为 None 的在下面统一过滤，交给采样参数默认值。
+        "enable_upscale": enable_upscale,
+        "upscale_scale": upscale_scale,
+        "upscale_model_path": upscale_model_path,
+        "upscale_native_scale": upscale_native_scale,
+        "upscale_tile": upscale_tile,
+        "upscale_max_frames": upscale_max_frames,
         "lora": _parse_form_json(lora, expected_type=dict),
         "extra_params": _parse_form_json(extra_params, expected_type=dict),
         "return_stage_metrics": return_stage_metrics,
